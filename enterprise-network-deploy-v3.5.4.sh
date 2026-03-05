@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.3"
+SCRIPT_VERSION="3.5.4"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -981,6 +981,7 @@ else
     fi
 
     # Rydd opp gamle forespørsler
+    # Fjern ALLE requests som bruker samme cert/key-filer (uansett navn/subject)
     log "Checking for old certificate requests..."
     ALL_REQUESTS=$(getcert list 2>/dev/null | grep "Request ID" | $AWK '{print $3}' | tr -d "'" || true)
 
@@ -988,8 +989,26 @@ else
         CLEANED_COUNT=0
         while IFS= read -r REQ_ID; do
             [ -z "$REQ_ID" ] && continue
-            REQ_CA=$(getcert list -i "$REQ_ID" 2>/dev/null | grep "^[[:space:]]*CA:" | $AWK '{print $2}' || true)
-            REQ_SUBJECT=$(getcert list -i "$REQ_ID" 2>/dev/null | grep "^[[:space:]]*subject:" | cut -d: -f2- || true)
+
+            # Sjekk om denne requesten bruker våre cert/key-filer
+            REQ_DETAILS=$(getcert list -i "$REQ_ID" 2>/dev/null || true)
+            REQ_CERT_PATH=$(echo "$REQ_DETAILS" | grep "certificate:" | grep -oP "location='[^']*'" | cut -d"'" -f2 || true)
+            REQ_KEY_PATH=$(echo "$REQ_DETAILS" | grep "key pair" | grep -oP "location='[^']*'" | cut -d"'" -f2 || true)
+
+            # Fjern hvis den bruker våre filer OG ikke er vår canonical request
+            if [[ "$REQ_CERT_PATH" == "$MACHINE_CERT" ]] || [[ "$REQ_KEY_PATH" == "$MACHINE_KEY" ]]; then
+                if [[ "$REQ_ID" == "enterprise-8021x-${HOSTNAME}" ]]; then
+                    log "  Keeping: $REQ_ID (canonical certificate)"
+                    continue
+                fi
+                log_warn "  Removing conflicting request: $REQ_ID (uses $MACHINE_CERT)"
+                getcert stop-tracking -i "$REQ_ID" 2>/dev/null || true
+                CLEANED_COUNT=$((CLEANED_COUNT + 1))
+                continue
+            fi
+
+            REQ_CA=$(echo "$REQ_DETAILS" | grep "^[[:space:]]*CA:" | $AWK '{print $2}' || true)
+            REQ_SUBJECT=$(echo "$REQ_DETAILS" | grep "^[[:space:]]*subject:" | cut -d: -f2- || true)
 
             if [[ "$REQ_CA" == "$CA_NAME" ]] && \
                [[ "$REQ_SUBJECT" == *"$HOSTNAME"* || "$REQ_SUBJECT" == *"$FQDN"* ]]; then
