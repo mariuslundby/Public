@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.1"
+SCRIPT_VERSION="3.5.2"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -517,12 +517,24 @@ configure_scep_ca() {
     CERTMONGER_VER=$(rpm -q certmonger 2>/dev/null || dpkg -l certmonger 2>/dev/null | grep -m1 "^ii" | $AWK '{print $3}' || echo "unknown")
     log "certmonger versjon: $CERTMONGER_VER"
 
-    # Detekter scep-submit capabilities
+    # Detekter scep-submit capabilities via versjonsnummer
     # CentOS 7 / certmonger 0.78.x støtter kun: -u -c -C -g -p -v
     # Nyere (0.79.x+) støtter også: -R -N -I
     local SCEP_SUPPORTS_R=false
-    if "$SCEP_HELPER" --help 2>&1 | grep -q -- '-R'; then
-        SCEP_SUPPORTS_R=true
+    local CM_MAJOR CM_MINOR
+    CM_MAJOR=$(echo "$CERTMONGER_VER" | grep -oP 'certmonger-\K[0-9]+' | head -1)
+    CM_MINOR=$(echo "$CERTMONGER_VER" | grep -oP 'certmonger-[0-9]+\.\K[0-9]+' | head -1)
+    if [ -n "$CM_MAJOR" ] && [ -n "$CM_MINOR" ]; then
+        if [ "$CM_MAJOR" -gt 0 ] || [ "$CM_MINOR" -ge 79 ]; then
+            SCEP_SUPPORTS_R=true
+        fi
+    else
+        # Kan ikke parse versjon – test med faktisk kall
+        if "$SCEP_HELPER" -u "https://test" -R /dev/null 2>&1 | grep -q "Usage:"; then
+            SCEP_SUPPORTS_R=false
+        else
+            SCEP_SUPPORTS_R=true
+        fi
     fi
     log "scep-submit støtter -R flag: $SCEP_SUPPORTS_R"
 
