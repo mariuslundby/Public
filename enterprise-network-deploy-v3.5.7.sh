@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.6"
+SCRIPT_VERSION="3.5.7"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -522,8 +522,8 @@ configure_scep_ca() {
     # Nyere (0.79.x+) støtter også: -R -N -I
     local SCEP_SUPPORTS_R=false
     local CM_MAJOR CM_MINOR
-    CM_MAJOR=$(echo "$CERTMONGER_VER" | grep -oP 'certmonger-\K[0-9]+' | head -1)
-    CM_MINOR=$(echo "$CERTMONGER_VER" | grep -oP 'certmonger-[0-9]+\.\K[0-9]+' | head -1)
+    CM_MAJOR=$(echo "$CERTMONGER_VER" | sed -n 's/.*certmonger-\([0-9]*\).*/\1/p' | head -1)
+    CM_MINOR=$(echo "$CERTMONGER_VER" | sed -n 's/.*certmonger-[0-9]*\.\([0-9]*\).*/\1/p' | head -1)
     if [ -n "$CM_MAJOR" ] && [ -n "$CM_MINOR" ]; then
         if [ "$CM_MAJOR" -gt 0 ] || [ "$CM_MINOR" -ge 79 ]; then
             SCEP_SUPPORTS_R=true
@@ -652,7 +652,7 @@ preflight_checks() {
     if [ "$TEST_MODE" = true ]; then
         log "[TEST] Would test DNS for: $NDES_HOST"
     else
-        if timeout 5 host "$NDES_HOST" &>/dev/null; then
+        if timeout 5 getent hosts "$NDES_HOST" &>/dev/null; then
             log_success "DNS resolution works for: $NDES_HOST"
         else
             log_warn "DNS resolution failed for: $NDES_HOST (may be expected)"
@@ -794,8 +794,13 @@ if ! command -v nmcli &>/dev/null; then
     else
         case "$OS" in
             fedora|rhel|centos|rocky|almalinux)
-                safe_execute "Installing NetworkManager" \
-                    "dnf install -y NetworkManager NetworkManager-wifi"
+                if command -v dnf &>/dev/null; then
+                    safe_execute "Installing NetworkManager" \
+                        "dnf install -y NetworkManager NetworkManager-wifi"
+                else
+                    safe_execute "Installing NetworkManager" \
+                        "yum install -y NetworkManager NetworkManager-wifi"
+                fi
                 ;;
             debian|ubuntu)
                 export DEBIAN_FRONTEND=noninteractive
@@ -877,13 +882,13 @@ else
     ACTIVE_WIRED_CONNECTION=""
     ACTIVE_WIFI_CONNECTION=""
 
-    ACTIVE_WIRED=$(echo "$ACTIVE_CONNECTIONS" | grep ":ethernet:" | head -1 || true)
+    ACTIVE_WIRED=$(echo "$ACTIVE_CONNECTIONS" | grep -E ":(ethernet|802-3-ethernet):" | head -1 || true)
     if [ -n "$ACTIVE_WIRED" ]; then
         ACTIVE_WIRED_CONNECTION=$(echo "$ACTIVE_WIRED" | cut -d: -f1)
         log "Active wired: $ACTIVE_WIRED_CONNECTION"
     fi
 
-    ACTIVE_WIFI=$(echo "$ACTIVE_CONNECTIONS" | grep ":wifi:" | head -1 || true)
+    ACTIVE_WIFI=$(echo "$ACTIVE_CONNECTIONS" | grep -E ":(wifi|802-11-wireless):" | head -1 || true)
     if [ -n "$ACTIVE_WIFI" ]; then
         ACTIVE_WIFI_CONNECTION=$(echo "$ACTIVE_WIFI" | cut -d: -f1)
         log "Active WiFi: $ACTIVE_WIFI_CONNECTION"
@@ -899,8 +904,13 @@ if [ "$TEST_MODE" = true ]; then
 else
     case "$OS" in
         fedora|rhel|centos|rocky|almalinux)
-            dnf install -y certmonger NetworkManager wpa_supplicant openssl curl &>/dev/null
-            dnf install -y NetworkManager-wifi &>/dev/null || log_warn "WiFi support not available"
+            if command -v dnf &>/dev/null; then
+                dnf install -y certmonger NetworkManager wpa_supplicant openssl curl &>/dev/null
+                dnf install -y NetworkManager-wifi &>/dev/null || log_warn "WiFi support not available"
+            else
+                yum install -y certmonger NetworkManager wpa_supplicant openssl curl &>/dev/null
+                yum install -y NetworkManager-wifi &>/dev/null || log_warn "WiFi support not available"
+            fi
             ;;
         debian|ubuntu)
             export DEBIAN_FRONTEND=noninteractive
@@ -1242,7 +1252,7 @@ if [ "$TEST_MODE" = true ]; then
     log "[TEST] Would create wired 802.1x profile (priority: $WIRED_PRIORITY)"
     log "[TEST] private-key-password-flags: not-required (4)"
 else
-    WIRED_INTERFACES=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep ethernet | cut -d: -f1 || true)
+    WIRED_INTERFACES=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep -E "ethernet|802-3-ethernet" | cut -d: -f1 || true)
 
     if [ -z "$WIRED_INTERFACES" ]; then
         log "No wired interfaces found"
@@ -1342,7 +1352,7 @@ if [ "$TEST_MODE" = true ]; then
     log "[TEST] Would create IndraNavia 802.1x WiFi profile (priority: $WIFI_PRIORITY)"
     log "[TEST] private-key-password-flags: not-required (4)"
 else
-    WIFI_INTERFACES=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep wifi | cut -d: -f1 || true)
+    WIFI_INTERFACES=$(nmcli -t -f DEVICE,TYPE device 2>/dev/null | grep -E "wifi|802-11-wireless" | cut -d: -f1 || true)
 
     if [ -z "$WIFI_INTERFACES" ]; then
         log "No WiFi interfaces found"
