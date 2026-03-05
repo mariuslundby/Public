@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.4"
+SCRIPT_VERSION="3.5.5"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -992,8 +992,8 @@ else
 
             # Sjekk om denne requesten bruker våre cert/key-filer
             REQ_DETAILS=$(getcert list -i "$REQ_ID" 2>/dev/null || true)
-            REQ_CERT_PATH=$(echo "$REQ_DETAILS" | grep "certificate:" | grep -oP "location='[^']*'" | cut -d"'" -f2 || true)
-            REQ_KEY_PATH=$(echo "$REQ_DETAILS" | grep "key pair" | grep -oP "location='[^']*'" | cut -d"'" -f2 || true)
+            REQ_CERT_PATH=$(echo "$REQ_DETAILS" | grep "certificate:" | sed "s/.*location='//" | sed "s/'.*//" || true)
+            REQ_KEY_PATH=$(echo "$REQ_DETAILS" | grep "key pair" | sed "s/.*location='//" | sed "s/'.*//" || true)
 
             # Fjern hvis den bruker våre filer OG ikke er vår canonical request
             if [[ "$REQ_CERT_PATH" == "$MACHINE_CERT" ]] || [[ "$REQ_KEY_PATH" == "$MACHINE_KEY" ]]; then
@@ -1043,14 +1043,21 @@ else
 
         log "Requesting certificate for: $FQDN"
 
-        getcert request \
+        GETCERT_REQ_OUT=$(getcert request \
             -c "$CA_NAME" \
             -I "$REQUEST_ID" \
             -k "$MACHINE_KEY" \
             -f "$MACHINE_CERT" \
             -N "CN=$FQDN" \
             -D "$FQDN" \
-            -r
+            -r 2>&1)
+        GETCERT_REQ_EXIT=$?
+        echo "$GETCERT_REQ_OUT" | tee -a "$LOG_FILE"
+
+        if [ $GETCERT_REQ_EXIT -ne 0 ] || echo "$GETCERT_REQ_OUT" | grep -qi "already used\|error\|failed"; then
+            log_error "getcert request feilet: $GETCERT_REQ_OUT"
+            exit 1
+        fi
 
         record_state "CERT_REQUESTED:$REQUEST_ID"
 
@@ -1121,22 +1128,26 @@ else
         fi
     fi
 
-    chmod 644 "$MACHINE_CERT"
-    chmod 600 "$MACHINE_KEY"
+    if [ -f "$MACHINE_CERT" ] && [ -f "$MACHINE_KEY" ]; then
+        chmod 644 "$MACHINE_CERT"
+        chmod 600 "$MACHINE_KEY"
 
-    log "Verifying private key has no passphrase..."
-    if openssl rsa -in "$MACHINE_KEY" -check -noout &>/dev/null; then
-        log_success "Private key verified (no passphrase)"
+        log "Verifying private key has no passphrase..."
+        if openssl pkey -in "$MACHINE_KEY" -noout &>/dev/null; then
+            log_success "Private key verified (no passphrase)"
+        else
+            log_error "Private key is not readable or has passphrase"
+            exit 1
+        fi
+
+        CERT_SUBJECT=$(openssl x509 -in "$MACHINE_CERT" -noout -subject | sed 's/subject=//')
+        CERT_EXPIRES=$(openssl x509 -in "$MACHINE_CERT" -noout -enddate | sed 's/notAfter=//')
+        log "Certificate: $MACHINE_CERT"
+        log "  Subject: $CERT_SUBJECT"
+        log "  Expires: $CERT_EXPIRES"
     else
-        log_error "Private key is not readable or has passphrase"
-        exit 1
+        log_warn "Certificate files not yet available (pending enrollment)"
     fi
-
-    CERT_SUBJECT=$(openssl x509 -in "$MACHINE_CERT" -noout -subject | sed 's/subject=//')
-    CERT_EXPIRES=$(openssl x509 -in "$MACHINE_CERT" -noout -enddate | sed 's/notAfter=//')
-    log "Certificate: $MACHINE_CERT"
-    log "  Subject: $CERT_SUBJECT"
-    log "  Expires: $CERT_EXPIRES"
 fi
 
 # ── [4/9] Extract CA certificate chain ───────────────────────────────────────
