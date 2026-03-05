@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.7"
+SCRIPT_VERSION="3.5.8"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -964,20 +964,40 @@ else
     mkdir -p "$CERT_BASE_PATH"
     chmod 700 "$CERT_BASE_PATH"
 
-    # Idempotent: sjekk om CA allerede er konfigurert OG fungerer
+    # Idempotent: sjekk om CA allerede er konfigurert OG har riktig config
     NEED_SCEP_RECONFIG=false
     if getcert list-cas 2>/dev/null | grep -q "^CA '$CA_NAME'"; then
-        # CA finnes – men sjekk om det er en gammel config som mangler encryption cert
-        # ved å se om en eksisterende request har NEED_SCEP_ENCRYPTION_CERT
+        # CA finnes – sjekk om configen er fra v3.5+ (system CA bundle, ingen ca_encryption_cert)
+        CA_HELPER_LINE=$(getcert list-cas -c "$CA_NAME" 2>/dev/null | grep "helper-location:" || true)
         EXISTING_STATUS=$(getcert list -i "enterprise-8021x-${HOSTNAME}" 2>/dev/null | grep "status:" | $AWK '{print $2}' || true)
+
         if [ "$EXISTING_STATUS" = "NEED_SCEP_ENCRYPTION_CERT" ]; then
-            log_warn "Eksisterende CA mangler encryption-cert – rekonfigurerer"
+            log_warn "Eksisterende request har NEED_SCEP_ENCRYPTION_CERT – rekonfigurerer"
+            getcert stop-tracking -i "enterprise-8021x-${HOSTNAME}" 2>/dev/null || true
+            getcert remove-ca -c "$CA_NAME" 2>/dev/null || true
+            sleep 3
+            NEED_SCEP_RECONFIG=true
+        elif [ "$EXISTING_STATUS" = "CA_UNCONFIGURED" ] || [ "$EXISTING_STATUS" = "CA_UNREACHABLE" ]; then
+            log_warn "Eksisterende request har $EXISTING_STATUS – rekonfigurerer"
+            getcert stop-tracking -i "enterprise-8021x-${HOSTNAME}" 2>/dev/null || true
+            getcert remove-ca -c "$CA_NAME" 2>/dev/null || true
+            sleep 3
+            NEED_SCEP_RECONFIG=true
+        elif ! echo "$CA_HELPER_LINE" | grep -q "ca-bundle.crt\|ca-certificates.crt"; then
+            # Gammel config bruker ikke system CA bundle – rekonfigurer til v3.5+
+            log_warn "CA config bruker ikke system CA bundle – oppgraderer til v3.5+"
+            getcert stop-tracking -i "enterprise-8021x-${HOSTNAME}" 2>/dev/null || true
+            getcert remove-ca -c "$CA_NAME" 2>/dev/null || true
+            sleep 3
+            NEED_SCEP_RECONFIG=true
+        elif echo "$CA_HELPER_LINE" | grep -q "ca_encryption_cert"; then
+            log_warn "CA config har ca_encryption_cert – rekonfigurerer"
             getcert stop-tracking -i "enterprise-8021x-${HOSTNAME}" 2>/dev/null || true
             getcert remove-ca -c "$CA_NAME" 2>/dev/null || true
             sleep 3
             NEED_SCEP_RECONFIG=true
         else
-            log "SCEP CA already configured"
+            log "SCEP CA already configured (v3.5+ format)"
         fi
     else
         NEED_SCEP_RECONFIG=true
