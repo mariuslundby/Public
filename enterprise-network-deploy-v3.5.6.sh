@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.5"
+SCRIPT_VERSION="3.5.6"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -983,7 +983,7 @@ else
     # Rydd opp gamle forespørsler
     # Fjern ALLE requests som bruker samme cert/key-filer (uansett navn/subject)
     log "Checking for old certificate requests..."
-    ALL_REQUESTS=$(getcert list 2>/dev/null | grep "Request ID" | $AWK '{print $3}' | tr -d "'" || true)
+    ALL_REQUESTS=$(getcert list 2>/dev/null | grep "Request ID" | $AWK '{print $3}' | tr -d "':\"" || true)
 
     if [ -n "$ALL_REQUESTS" ]; then
         CLEANED_COUNT=0
