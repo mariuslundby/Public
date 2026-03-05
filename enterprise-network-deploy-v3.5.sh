@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.0"
+SCRIPT_VERSION="3.5.1"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -250,17 +250,17 @@ trap cleanup_on_exit EXIT
 # ─────────────────────────────────────────────
 
 ensure_sha1_policy() {
-    if [ -f /etc/crypto-policies/state/CURRENT.pol ]; then
-        if grep -q "__openssl_block_sha1_signatures = 1" /etc/crypto-policies/state/CURRENT.pol 2>/dev/null; then
-            CURRENT_POLICY=$(update-crypto-policies --show 2>/dev/null || echo "DEFAULT")
-            if [[ "$CURRENT_POLICY" != *"SHA1"* ]]; then
-                log "Fedora crypto policy blokkerer SHA-1 – aktiverer SHA1 subpolicy for SCEP"
-                update-crypto-policies --set "${CURRENT_POLICY}:SHA1" 2>&1 | head -3
-                record_state "CRYPTO_POLICY_CHANGED:${CURRENT_POLICY}"
-                log_success "Crypto policy endret til ${CURRENT_POLICY}:SHA1"
-            else
-                log "SHA-1 allerede tillatt i crypto policy"
-            fi
+    if command -v update-crypto-policies &>/dev/null; then
+        CURRENT_POLICY=$(update-crypto-policies --show 2>/dev/null || echo "DEFAULT")
+        if [[ "$CURRENT_POLICY" != *"SHA1"* ]]; then
+            # Rocky 9, Fedora 42+ og RHEL 9+ blokkerer SHA-1 PKCS7 signaturer
+            # NDES/SCEP bruker SHA-1 → må aktivere SHA1 subpolicy
+            log "Crypto policy ($CURRENT_POLICY) mangler SHA1 – aktiverer for SCEP kompatibilitet"
+            update-crypto-policies --set "${CURRENT_POLICY}:SHA1" 2>&1 | head -3
+            record_state "CRYPTO_POLICY_CHANGED:${CURRENT_POLICY}"
+            log_success "Crypto policy endret til ${CURRENT_POLICY}:SHA1"
+        else
+            log "SHA-1 allerede tillatt i crypto policy"
         fi
     fi
 }
@@ -514,31 +514,47 @@ configure_scep_ca() {
     # henter RA encryption cert dynamisk via GetCACert (scep-submit -C).
     # Manuell ca_encryption_cert fører til "Error decrypting PKCS#7" og NEED_GUIDANCE.
 
-    CERTMONGER_VER=$(rpm -q certmonger 2>/dev/null || dpkg -l certmonger 2>/dev/null | grep certmonger | $AWK '{print $3}' || echo "unknown")
+    CERTMONGER_VER=$(rpm -q certmonger 2>/dev/null || dpkg -l certmonger 2>/dev/null | grep -m1 "^ii" | $AWK '{print $3}' || echo "unknown")
     log "certmonger versjon: $CERTMONGER_VER"
 
+    # Detekter scep-submit capabilities
+    # CentOS 7 / certmonger 0.78.x støtter kun: -u -c -C -g -p -v
+    # Nyere (0.79.x+) støtter også: -R -N -I
+    local SCEP_SUPPORTS_R=false
+    if "$SCEP_HELPER" --help 2>&1 | grep -q -- '-R'; then
+        SCEP_SUPPORTS_R=true
+    fi
+    log "scep-submit støtter -R flag: $SCEP_SUPPORTS_R"
+
     # Bygg scep-submit kommandolinje
-    # -R MÅ peke på system CA bundle (IKKE Indra Root CA) fordi NDES TLS-sert
-    # er fra Microsoft (msappproxy.net), ikke Indra CA.
-    # Ingen -r: certmonger henter RA-sert dynamisk via GetCACert.
     local SYSTEM_CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
     [ ! -f "$SYSTEM_CA_BUNDLE" ] && SYSTEM_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
-    SCEP_HELPER_ARGS="-u $SCEP_URL -R $SYSTEM_CA_BUNDLE"
-    [ -s "$PERM_ENTERPRISE_CA" ] && SCEP_HELPER_ARGS="$SCEP_HELPER_ARGS -N $PERM_ENTERPRISE_CA"
-    [ -s "$PERM_ALL_CERTS" ] && SCEP_HELPER_ARGS="$SCEP_HELPER_ARGS -I $PERM_ALL_CERTS"
+
+    if [ "$SCEP_SUPPORTS_R" = true ]; then
+        # Nyere certmonger: -R for TLS verification via system CA bundle
+        SCEP_HELPER_ARGS="-u $SCEP_URL -R $SYSTEM_CA_BUNDLE"
+        [ -s "$PERM_ENTERPRISE_CA" ] && SCEP_HELPER_ARGS="$SCEP_HELPER_ARGS -N $PERM_ENTERPRISE_CA"
+        [ -s "$PERM_ALL_CERTS" ] && SCEP_HELPER_ARGS="$SCEP_HELPER_ARGS -I $PERM_ALL_CERTS"
+    else
+        # Gammel certmonger (CentOS 7 etc): kun -u støttet
+        SCEP_HELPER_ARGS="-u $SCEP_URL"
+    fi
 
     log "scep-submit args: $SCEP_HELPER_ARGS"
 
     # Registrer CA via getcert
-    # -R MÅ brukes for HTTPS, men peke på SYSTEM CA bundle (ikke Indra Root CA)
-    # fordi NDES via msappproxy bruker Microsoft TLS-sertifikat
-    local SYSTEM_CA_BUNDLE="/etc/pki/tls/certs/ca-bundle.crt"
-    [ ! -f "$SYSTEM_CA_BUNDLE" ] && SYSTEM_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
     log "Registrerer SCEP CA (TLS via system CA bundle: $SYSTEM_CA_BUNDLE)..."
-    SCEP_OUT=$(getcert add-scep-ca \
-        -c "$CA_NAME" \
-        -u "$SCEP_URL" \
-        -R "$SYSTEM_CA_BUNDLE" 2>&1)
+    if [ "$SCEP_SUPPORTS_R" = true ]; then
+        SCEP_OUT=$(getcert add-scep-ca \
+            -c "$CA_NAME" \
+            -u "$SCEP_URL" \
+            -R "$SYSTEM_CA_BUNDLE" 2>&1)
+    else
+        # Gammel getcert: ingen -R, bruker system trust store automatisk
+        SCEP_OUT=$(getcert add-scep-ca \
+            -c "$CA_NAME" \
+            -u "$SCEP_URL" 2>&1)
+    fi
     echo "$SCEP_OUT" | tee -a "$LOG_FILE"
 
     sleep 5
