@@ -7,7 +7,7 @@ fi
 
 set -o pipefail
 
-SCRIPT_VERSION="3.5.2"
+SCRIPT_VERSION="3.5.3"
 TEST_MODE=false
 
 if [[ "$1" == "--test" ]]; then
@@ -555,18 +555,12 @@ configure_scep_ca() {
     log "scep-submit args: $SCEP_HELPER_ARGS"
 
     # Registrer CA via getcert
+    # getcert add-scep-ca krever ALLTID -R for HTTPS (også på CentOS 7)
     log "Registrerer SCEP CA (TLS via system CA bundle: $SYSTEM_CA_BUNDLE)..."
-    if [ "$SCEP_SUPPORTS_R" = true ]; then
-        SCEP_OUT=$(getcert add-scep-ca \
-            -c "$CA_NAME" \
-            -u "$SCEP_URL" \
-            -R "$SYSTEM_CA_BUNDLE" 2>&1)
-    else
-        # Gammel getcert: ingen -R, bruker system trust store automatisk
-        SCEP_OUT=$(getcert add-scep-ca \
-            -c "$CA_NAME" \
-            -u "$SCEP_URL" 2>&1)
-    fi
+    SCEP_OUT=$(getcert add-scep-ca \
+        -c "$CA_NAME" \
+        -u "$SCEP_URL" \
+        -R "$SYSTEM_CA_BUNDLE" 2>&1)
     echo "$SCEP_OUT" | tee -a "$LOG_FILE"
 
     sleep 5
